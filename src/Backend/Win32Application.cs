@@ -1,15 +1,15 @@
+using ABI.Microsoft.Graphics.Canvas;
 using System;
 using System.Diagnostics.CodeAnalysis;
-using ABI.Microsoft.Graphics.Canvas;
 using TerraFX.Interop.DirectX;
 using TerraFX.Interop.Windows;
 using TerraFX.Interop.WinRT;
 using Windows.Graphics.DirectX;
-using Windows.Graphics.Imaging;
 using WinRT;
 
 namespace Win2DRenderer.Backend;
 
+using Color = Windows.UI.Color;
 using CanvasDevice = Microsoft.Graphics.Canvas.CanvasDevice;
 using CanvasDrawingSession = Microsoft.Graphics.Canvas.CanvasDrawingSession;
 using CanvasSwapChain = Microsoft.Graphics.Canvas.CanvasSwapChain;
@@ -18,7 +18,7 @@ using Windows = TerraFX.Interop.Windows.Windows;
 /// <summary>
 /// A simple Win32 application handling a D2D swapchain.
 /// </summary>
-internal sealed class Win32Application
+internal sealed class Win32Application : IDisposable
 {
     /// <summary>
     /// The <see cref="CanvasDevice"/> instance to use.
@@ -31,11 +31,6 @@ internal sealed class Win32Application
     private CanvasSwapChain? canvasSwapChain;
 
     /// <summary>
-    /// Whether or not the window has been resized and requires the buffers to be updated.
-    /// </summary>
-    private volatile bool isResizePending;
-
-    /// <summary>
     /// The current screen width in raw pixels.
     /// </summary>
     private uint screenWidth;
@@ -44,6 +39,21 @@ internal sealed class Win32Application
     /// The current screen height in raw pixels.
     /// </summary>
     private uint screenHeight;
+
+    /// <summary>
+    /// Composition device to set up the composition
+    /// </summary>
+    private ComPtr<IDCompositionDevice> dcompDevice;
+
+    /// <summary>
+    /// A composition target to the window
+    /// </summary>
+    private ComPtr<IDCompositionTarget> dcompTarget;
+
+    /// <summary>
+    /// A visual which displays the swapchain backbuffer
+    /// </summary>
+    private ComPtr<IDCompositionVisual> dcompVisual;
 
     /// <summary>
     /// Raised whenever a draw operation can be performed.
@@ -56,7 +66,7 @@ internal sealed class Win32Application
     /// <param name="hwnd">The handle for the window.</param>
     [MemberNotNull(nameof(canvasDevice))]
     [MemberNotNull(nameof(canvasSwapChain))]
-    public unsafe void OnInitialize(HWND hwnd)
+    public unsafe void OnInitialize(HWND hwnd, int width, int height)
     {
         // Create a new canvas device, which will handle DX11/D2D initialization
         CanvasDevice canvasDevice = new();
@@ -64,6 +74,7 @@ internal sealed class Win32Application
 
         // Create the swap chain to display frames
         using (ComPtr<IUnknown> direct3DDeviceUnknown = default)
+        using (ComPtr<IDXGIDevice> directDxgiDevice = default)
         using (ComPtr<IDXGIFactory2> dxgiFactory2 = default)
         using (ComPtr<IDXGISwapChain1> dxgiSwapChain1 = default)
         {
@@ -83,6 +94,10 @@ internal sealed class Win32Application
                 hresult = direct3DDxgiInterfaceAccess.Get()->GetInterface(Windows.__uuidof<IUnknown>(), (void**)direct3DDeviceUnknown.GetAddressOf());
 
                 ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+                hresult = direct3DDeviceUnknown.Get()->QueryInterface(Windows.__uuidof<IDXGIDevice>(), (void**)directDxgiDevice.GetAddressOf());
+
+                ExceptionHelpers.ThrowExceptionForHR(hresult);
             }
 
             // Create the DXGIFactory2 instance to create the swapchain with
@@ -91,7 +106,7 @@ internal sealed class Win32Application
             ExceptionHelpers.ThrowExceptionForHR(hresult);
 
             DXGI_SWAP_CHAIN_DESC1 dxgiSwapChainDesc1 = default;
-            dxgiSwapChainDesc1.AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_IGNORE;
+            dxgiSwapChainDesc1.AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED;
             dxgiSwapChainDesc1.BufferCount = 2;
             dxgiSwapChainDesc1.BufferUsage = DXGI.DXGI_USAGE_RENDER_TARGET_OUTPUT;
             dxgiSwapChainDesc1.Flags = 0;
@@ -104,13 +119,53 @@ internal sealed class Win32Application
             dxgiSwapChainDesc1.SwapEffect = DXGI_SWAP_EFFECT.DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
             // Create the native DXGI swapchain object to wrap
-            hresult = dxgiFactory2.Get()->CreateSwapChainForHwnd(
+            hresult = dxgiFactory2.Get()->CreateSwapChainForComposition(
                 direct3DDeviceUnknown.Get(),
-                hwnd,
                 &dxgiSwapChainDesc1,
                 null,
-                null,
                 dxgiSwapChain1.GetAddressOf());
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+            
+            // Create the composition visuals and layers for the wrapped swapchain to draw on
+            hresult = DirectX.DCompositionCreateDevice(
+                directDxgiDevice.Get(),
+                Windows.__uuidof<IDCompositionDevice>(),
+                (void**)dcompDevice.GetAddressOf()
+            );
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            hresult = dcompDevice.Get()->CreateTargetForHwnd(
+                hwnd,
+                false,
+                dcompTarget.GetAddressOf()
+            );
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            hresult = dcompDevice.Get()->CreateVisual(
+                dcompVisual.GetAddressOf()
+            );
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            // Everything thats drawn white whill instead be the inverted color of whats underneath
+            hresult = dcompVisual.Get()->SetCompositeMode(DCOMPOSITION_COMPOSITE_MODE.DCOMPOSITION_COMPOSITE_MODE_DESTINATION_INVERT);
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            hresult = dcompVisual.Get()->SetContent(
+                (IUnknown*)dxgiSwapChain1.Get()
+            );
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            hresult = dcompTarget.Get()->SetRoot(dcompVisual.Get());
+
+            ExceptionHelpers.ThrowExceptionForHR(hresult);
+
+            hresult = dcompDevice.Get()->Commit();
 
             ExceptionHelpers.ThrowExceptionForHR(hresult);
 
@@ -145,19 +200,21 @@ internal sealed class Win32Application
                 // Marshal to a WinRT managed object
                 canvasSwapChain = MarshalInspectable<CanvasSwapChain>.FromAbi((IntPtr)canvasSwapChainUnknown.Get());
             }
+
+            canvasSwapChain!.ResizeBuffers(
+                newWidth: width,
+                newHeight: height,
+                newDpi: 96.0f,
+                newFormat: DirectXPixelFormat.Unknown,
+                bufferCount: 0
+            );
         }
 
         // Save the Win2D objects for later use
         this.canvasDevice = canvasDevice;
         this.canvasSwapChain = canvasSwapChain;
-    }
-
-    /// <summary>
-    /// Resizes the current application.
-    /// </summary>
-    public void OnResize()
-    {
-        this.isResizePending = true;
+        this.screenWidth = (uint)width;
+        this.screenHeight = (uint)height;
     }
 
     /// <summary>
@@ -166,26 +223,8 @@ internal sealed class Win32Application
     /// <param name="time">The current time since the start of the application.</param>
     public void OnUpdate(TimeSpan time)
     {
-        if (this.isResizePending)
-        {
-            // Resize the swapchain if needed (the size is calculated automatically)
-            this.canvasSwapChain!.ResizeBuffers(
-                newWidth: 0,
-                newHeight: 0,
-                newDpi: 96.0f,
-                newFormat: DirectXPixelFormat.Unknown,
-                bufferCount: 0);
-
-            BitmapSize bitmapSize = this.canvasSwapChain!.SizeInPixels;
-
-            this.screenWidth = bitmapSize.Width;
-            this.screenHeight = bitmapSize.Height;
-
-            this.isResizePending = false;
-        }
-
         // Create the drawing session and invoke all registered draw handler
-        using (CanvasDrawingSession canvasDrawingSession = this.canvasSwapChain!.CreateDrawingSession(default))
+        using (CanvasDrawingSession canvasDrawingSession = this.canvasSwapChain!.CreateDrawingSession(default(Color)))
         {
             Draw?.Invoke(this, new DrawEventArgs
             {
@@ -196,11 +235,19 @@ internal sealed class Win32Application
             });
         }
 
-        // Wait for v-sync
-        this.canvasSwapChain.WaitForVerticalBlank();
-
         // Present the new frame
-        this.canvasSwapChain.Present(syncInterval: 1);
+        this.canvasSwapChain.Present(syncInterval: 4);
+    }
+
+    public void Dispose()
+    {
+        this.canvasDevice?.Dispose();
+        this.canvasDevice = null;
+        this.canvasSwapChain?.Dispose();
+        this.canvasSwapChain = null;
+        this.dcompDevice.Dispose();
+        this.dcompTarget.Dispose();
+        this.dcompVisual.Dispose();
     }
 
     /// <summary>

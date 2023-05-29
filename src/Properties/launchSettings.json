@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "Win2DRenderer": {
+      "commandName": "Project",
+      "nativeDebugging": true,
+      "hotReloadEnabled": false
+    }
+  }
+}

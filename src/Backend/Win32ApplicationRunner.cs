@@ -1,8 +1,6 @@
-using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
-using System.Threading;
 using TerraFX.Interop.Windows;
 
 namespace Win2DRenderer.Backend;
@@ -15,16 +13,6 @@ using Windows = TerraFX.Interop.Windows.Windows;
 internal static unsafe class Win32ApplicationRunner
 {
     /// <summary>
-    /// Whether or not a resize operation is in progress.
-    /// </summary>
-    private static bool isResizing = false;
-
-    /// <summary>
-    /// Whether or not the application is currently paused.
-    /// </summary>
-    private static bool isPaused = false;
-
-    /// <summary>
     /// The <see cref="HWND"/> for the application window.
     /// </summary>
     private static HWND hwnd;
@@ -33,11 +21,6 @@ internal static unsafe class Win32ApplicationRunner
     /// The application being run.
     /// </summary>
     private static Win32Application application = null!;
-
-    /// <summary>
-    /// The thread running the render loop.
-    /// </summary>
-    private static Thread renderThread = null!;
 
     /// <summary>
     /// Runs a specified application and starts the main loop to update its state. This is the entry point for a given application,
@@ -52,13 +35,17 @@ internal static unsafe class Win32ApplicationRunner
 
         HMODULE hInstance = Windows.GetModuleHandleW(null);
 
+        Rectangle windowRect = new(0, 0, 1280, 720);
+
+        int height = (windowRect.Bottom - windowRect.Top);
+        int width = (windowRect.Right - windowRect.Left);
+
         fixed (char* name = applicationName)
         {
             // Initialize the window class
             WNDCLASSEXW windowClassEx = new()
             {
                 cbSize = (uint)sizeof(WNDCLASSEXW),
-                style = CS.CS_HREDRAW | CS.CS_VREDRAW,
                 lpfnWndProc = &WindowProc,
                 hInstance = hInstance,
                 hCursor = Windows.LoadCursorW(HINSTANCE.NULL, IDC.IDC_ARROW),
@@ -68,87 +55,57 @@ internal static unsafe class Win32ApplicationRunner
             // Register the window class
             _ = Windows.RegisterClassExW(&windowClassEx);
 
-            Rectangle windowRect = new(0, 0, 1280, 720);
-
-            // Set the target window size
-            _ = Windows.AdjustWindowRect((RECT*)&windowRect, WS.WS_OVERLAPPEDWINDOW, Windows.FALSE);
-
-            uint height = (uint)(windowRect.Bottom - windowRect.Top);
-            uint width = (uint)(windowRect.Right - windowRect.Left);
-
             // Create the window and store a handle to it
+            // Using composition its better to not have a redirection bitmap. It's always better for your window to be layered
+            // Setting the layered window to be transparent so its "click trough"
             hwnd = Windows.CreateWindowExW(
-                0,
+                WS.WS_EX_NOREDIRECTIONBITMAP | WS.WS_EX_LAYERED | WS.WS_EX_TRANSPARENT | WS.WS_EX_TOPMOST, 
                 windowClassEx.lpszClassName,
                 (ushort*)name,
-                WS.WS_OVERLAPPEDWINDOW,
-                Windows.CW_USEDEFAULT,
-                Windows.CW_USEDEFAULT,
-                (int)width,
-                (int)height,
+                WS.WS_POPUP,
+                // Assuming a 1920x1080 display
+                (1920 / 2) - (width / 2),
+                (1080 / 2) - (height / 2),
+                width,
+                height,
                 HWND.NULL,
                 HMENU.NULL,
                 hInstance,
                 (void*)GCHandle.ToIntPtr(GCHandle.Alloc(application))
             );
 
-            MARGINS margins = default;
-            margins.cxLeftWidth = -1;
-            margins.cxRightWidth = -1;
-            margins.cyTopHeight = -1;
-            margins.cyBottomHeight = -1;
+            Windows.SetLayeredWindowAttributes(hwnd, default, 255, LWA.LWA_ALPHA);
 
-            _ = Windows.DwmExtendFrameIntoClientArea(hwnd, &margins);
+            // Turns the whole window into Mica (only in newer versions of Windows 11)
+            // DWM_SYSTEMBACKDROP_TYPE sbt = DWM_SYSTEMBACKDROP_TYPE.DWMSBT_MAINWINDOW;
+            // _ = Windows.DwmSetWindowAttribute(hwnd, (uint)DWMWINDOWATTRIBUTE.DWMWA_SYSTEMBACKDROP_TYPE, &sbt, 4);
+
+            // Turns the window Mica into dark mode
+            // int yes = 1;
+            // _ = Windows.DwmSetWindowAttribute(hwnd, (uint)DWMWINDOWATTRIBUTE.DWMWA_USE_IMMERSIVE_DARK_MODE, &yes, 4);
         }
 
         // Initialize the application
-        application.OnInitialize(hwnd);
+        application.OnInitialize(hwnd, width, height);
 
         // Display the window
         _ = Windows.ShowWindow(hwnd, SW.SW_SHOWDEFAULT);
 
         MSG msg = default;
-
-        // Setup the render thread that enables smooth resizing of the window
-        renderThread = new Thread(static args =>
-        {
-            (Win32Application application, CancellationToken token) = ((Win32Application, CancellationToken))args!;
-
-            Stopwatch stopwatch = Stopwatch.StartNew();
-
-            while (!token.IsCancellationRequested)
-            {
-                application.OnUpdate(stopwatch.Elapsed);
-            }
-        });
-
-        CancellationTokenSource tokenSource = new();
-
-        renderThread.Start((application, tokenSource.Token));
+        Stopwatch stopwatch = Stopwatch.StartNew();
 
         // Process any messages in the queue
         while (msg.message != WM.WM_QUIT)
         {
             if (Windows.PeekMessageW(&msg, HWND.NULL, 0, 0, PM.PM_REMOVE) != 0)
             {
-                _ = Windows.TranslateMessage(&msg);
                 _ = Windows.DispatchMessageW(&msg);
             }
-            else if (isPaused)
+            else
             {
-                Thread.Sleep(100);
-            }
-
-            // Also listen to Escape and 'Q' to quit
-            if (msg.message == WM.WM_KEYUP && (msg.wParam == (WPARAM)VK.VK_ESCAPE || msg.wParam == 'Q'))
-            {
-                _ = Windows.DestroyWindow(hwnd);
+                application.OnUpdate(stopwatch.Elapsed);
             }
         }
-
-        tokenSource.Cancel();
-
-        renderThread.Join();
 
         // Return this part of the WM_QUIT message to Windows
         return (int)msg.wParam;
@@ -167,167 +124,6 @@ internal static unsafe class Win32ApplicationRunner
     {
         switch (uMsg)
         {
-            // Change the paused state on window activation
-            case WM.WM_ACTIVATE:
-            {
-                if (Windows.LOWORD(wParam) == Windows.WA_INACTIVE)
-                {
-                    isPaused = true;
-                }
-                else
-                {
-                    isPaused = false;
-                }
-
-                return 0;
-            }
-
-            // Change the paused state when ESC is pressed
-            case WM.WM_KEYDOWN:
-            {
-                if (wParam == (byte)ConsoleKey.Escape)
-                {
-
-                    if (isPaused)
-                    {
-                        _ = Windows.SetCapture(hwnd);
-                    }
-                    else
-                    {
-                        _ = Windows.ReleaseCapture();
-                    }
-
-                    isPaused = !isPaused;
-                }
-
-                return 0;
-            }
-
-            // Window resize started
-            case WM.WM_ENTERSIZEMOVE:
-            {
-                isResizing = true;
-
-                return 0;
-            }
-
-            // Window resize completed
-            case WM.WM_EXITSIZEMOVE:
-            {
-                isResizing = false;
-                application.OnResize();
-
-                return 0;
-            }
-
-            // Size update
-            case WM.WM_SIZE:
-            {
-                if (!isResizing && wParam != Windows.SIZE_MINIMIZED)
-                {
-                    application.OnResize();
-                }
-
-                return 0;
-            }
-
-            // Size and position of the window (needed to enable the borderless mode)
-            case WM.WM_NCCALCSIZE:
-            {
-                return 0;
-            }
-
-            // Enable dragging the window
-            case WM.WM_NCHITTEST:
-            {
-                POINT point;
-                RECT rect;
-
-                _ = Windows.GetCursorPos(&point);
-                _ = Windows.GetWindowRect(hwnd, &rect);
-
-                bool isAtTop = Math.Abs(point.y - rect.top) < 12;
-                bool isAtRight = Math.Abs(point.x - rect.right) < 12;
-                bool isAtBottom = Math.Abs(point.y - rect.bottom) < 12;
-                bool isAtLeft = Math.Abs(point.x - rect.left) < 12;
-
-                if (isAtTop)
-                {
-                    if (isAtRight)
-                    {
-                        return Windows.HTTOPRIGHT;
-                    }
-
-                    if (isAtLeft)
-                    {
-                        return Windows.HTTOPLEFT;
-                    }
-
-                    return Windows.HTTOP;
-                }
-
-                if (isAtRight)
-                {
-                    if (isAtTop)
-                    {
-                        return Windows.HTTOPRIGHT;
-                    }
-
-                    if (isAtBottom)
-                    {
-                        return Windows.HTBOTTOMRIGHT;
-                    }
-
-                    return Windows.HTRIGHT;
-                }
-
-                if (isAtBottom)
-                {
-                    if (isAtRight)
-                    {
-                        return Windows.HTBOTTOMRIGHT;
-                    }
-
-                    if (isAtLeft)
-                    {
-                        return Windows.HTBOTTOMLEFT;
-                    }
-
-                    return Windows.HTBOTTOM;
-                }
-
-                if (isAtLeft)
-                {
-                    if (isAtTop)
-                    {
-                        return Windows.HTTOPLEFT;
-                    }
-
-                    if (isAtBottom)
-                    {
-                        return Windows.HTBOTTOMLEFT;
-                    }
-
-                    return Windows.HTLEFT;
-                }
-
-                return Windows.HTCAPTION;
-            }
-
-            // Restore the drop shadow
-            case WM.WM_DWMCOMPOSITIONCHANGED:
-            {
-                MARGINS margins = default;
-                margins.cxLeftWidth = -1;
-                margins.cxRightWidth = -1;
-                margins.cyTopHeight = -1;
-                margins.cyBottomHeight = -1;
-
-                _ = Windows.DwmExtendFrameIntoClientArea(hwnd, &margins);
-
-                return 0;
-            }
-
             // Shutdown
             case WM.WM_DESTROY:
             {
