@@ -35,7 +35,7 @@ internal static unsafe class Win32ApplicationRunner
 
         HMODULE hInstance = Windows.GetModuleHandleW(null);
 
-        Rectangle windowRect = new(0, 0, 1280, 720);
+        Rectangle windowRect = new(0, 0, 100, 100);
 
         int height = (windowRect.Bottom - windowRect.Top);
         int width = (windowRect.Right - windowRect.Left);
@@ -75,36 +75,23 @@ internal static unsafe class Win32ApplicationRunner
             );
 
             Windows.SetLayeredWindowAttributes(hwnd, default, 255, LWA.LWA_ALPHA);
-
-            // Turns the whole window into Mica (only in newer versions of Windows 11)
-            // DWM_SYSTEMBACKDROP_TYPE sbt = DWM_SYSTEMBACKDROP_TYPE.DWMSBT_MAINWINDOW;
-            // _ = Windows.DwmSetWindowAttribute(hwnd, (uint)DWMWINDOWATTRIBUTE.DWMWA_SYSTEMBACKDROP_TYPE, &sbt, 4);
-
-            // Turns the window Mica into dark mode
-            // int yes = 1;
-            // _ = Windows.DwmSetWindowAttribute(hwnd, (uint)DWMWINDOWATTRIBUTE.DWMWA_USE_IMMERSIVE_DARK_MODE, &yes, 4);
         }
 
         // Initialize the application
         application.OnInitialize(hwnd, width, height);
 
+        // render client area
+        application.OnUpdate(default);
+
         // Display the window
         _ = Windows.ShowWindow(hwnd, SW.SW_SHOWDEFAULT);
 
         MSG msg = default;
-        Stopwatch stopwatch = Stopwatch.StartNew();
 
         // Process any messages in the queue
-        while (msg.message != WM.WM_QUIT)
+        while (Windows.GetMessageW(&msg, default, 0, 0))
         {
-            if (Windows.PeekMessageW(&msg, HWND.NULL, 0, 0, PM.PM_REMOVE) != 0)
-            {
-                _ = Windows.DispatchMessageW(&msg);
-            }
-            else
-            {
-                application.OnUpdate(stopwatch.Elapsed);
-            }
+            _ = Windows.DispatchMessageW(&msg);
         }
 
         // Return this part of the WM_QUIT message to Windows

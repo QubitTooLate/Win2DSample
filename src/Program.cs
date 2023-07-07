@@ -16,13 +16,13 @@ win32Application.Draw += static (_, e) =>
     using CanvasTextFormat textFormat = new()
     {
         FontFamily = "Segoe UI",
-        FontSize = 100.0f,
+        FontSize = 36.0f,
         FontWeight = new FontWeight(700),
         HorizontalAlignment = CanvasHorizontalAlignment.Center,
         VerticalAlignment = CanvasVerticalAlignment.Center
     };
 
-    e.DrawingSession.DrawText($"Hello, world!\n{e.TotalTime}", new Rect(0, 0, e.ScreenWidth, e.ScreenHeight), Color.FromArgb(255, 255, 255, 255), textFormat);
+    e.DrawingSession.DrawText($"👌", new Rect(0, 0, e.ScreenWidth, e.ScreenHeight), Color.FromArgb(255, 255, 255, 255), textFormat);
 };
 
-return Win32ApplicationRunner.Run(win32Application, "Win2D sample");
+return Win32ApplicationRunner.Run(win32Application, "Crosshair");
